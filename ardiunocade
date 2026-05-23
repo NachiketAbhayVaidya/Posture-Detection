@@ -1,0 +1,743 @@
+#include <veda.naik-project-1_inferencing.h>
+#include <Wire.h>
+#include <MPU6050.h>
+
+MPU6050 mpu;
+
+// =====================================================
+// PIN DEFINITIONS
+// =====================================================
+
+#define FSR_LEFT       32
+#define FSR_RIGHT      35
+#define BUZZER_PIN      5
+#define VIBE_PIN_1     18
+#define VIBE_PIN_2     19
+
+// =====================================================
+// SETTINGS
+// =====================================================
+
+float SLOUCH_THRESHOLD = 12.0;
+int   FSR_THRESHOLD    = 500;
+
+#define SLOUCH_CONFIRM_MS          5000
+#define ML_CONFIDENCE_MIN          0.55f
+
+#define PREDICT_FRAMES             5
+float PREDICT_THRESHOLD = 0.5;
+
+#define FOCUS_MINUTES              1
+#define BREAK_MINUTES              1
+#define MAX_SLOUCHES_BEFORE_PAUSE  5
+
+// =====================================================
+// SENSOR STATES
+// =====================================================
+
+int fsrLeft = 0;
+int fsrRight = 0;
+
+bool isSitting = false;
+
+float pitch = 0.0;
+float previousPitch = 0.0;
+
+int worseningCount = 0;
+
+// =====================================================
+// SLOUCH STATES
+// =====================================================
+
+bool slouchDetected = false;
+bool slouchConfirmed = false;
+
+unsigned long slouchStartMs = 0;
+
+int slouchCount = 0;
+
+// =====================================================
+// POSTURE
+// =====================================================
+
+String postureLabel = "upright";
+String severityLabel = "Good";
+
+// =====================================================
+// VIBRATION
+// =====================================================
+
+unsigned long vibe1UntilMs = 0;
+unsigned long vibe2UntilMs = 0;
+
+// =====================================================
+// POMODORO
+// =====================================================
+
+bool pomoRunning = false;
+bool onBreak = false;
+bool pausedBySlouch = false;
+
+long remainingSec = FOCUS_MINUTES * 60;
+
+unsigned long lastPomoTickMs = 0;
+
+String pomoStatusMessage = "";
+
+bool sessionJustChanged = false;
+
+// =====================================================
+// EDGE IMPULSE
+// =====================================================
+
+float features[EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE];
+
+// =====================================================
+// TIME FORMAT
+// =====================================================
+
+String formatTime(long sec) {
+
+  int m = sec / 60;
+  int s = sec % 60;
+
+  char buf[10];
+
+  sprintf(buf, "%02d:%02d", m, s);
+
+  return String(buf);
+}
+
+// =====================================================
+// VIBRATION
+// =====================================================
+
+void vibe1Start(int durationMs) {
+
+  digitalWrite(VIBE_PIN_1, HIGH);
+
+  vibe1UntilMs = millis() + durationMs;
+}
+
+void vibe2Start(int durationMs) {
+
+  digitalWrite(VIBE_PIN_2, HIGH);
+
+  vibe2UntilMs = millis() + durationMs;
+}
+
+void vibeBothStart(int durationMs) {
+
+  vibe1Start(durationMs);
+  vibe2Start(durationMs);
+}
+
+void vibeUpdate() {
+
+  if (millis() >= vibe1UntilMs) {
+    digitalWrite(VIBE_PIN_1, LOW);
+  }
+
+  if (millis() >= vibe2UntilMs) {
+    digitalWrite(VIBE_PIN_2, LOW);
+  }
+}
+
+void vibePulses(int count, int durMs, int gapMs) {
+
+  for (int i = 0; i < count; i++) {
+
+    digitalWrite(VIBE_PIN_1, HIGH);
+    digitalWrite(VIBE_PIN_2, HIGH);
+
+    delay(durMs);
+
+    digitalWrite(VIBE_PIN_1, LOW);
+    digitalWrite(VIBE_PIN_2, LOW);
+
+    if (i < count - 1) {
+      delay(gapMs);
+    }
+  }
+}
+
+// =====================================================
+// SEVERITY
+// =====================================================
+
+String getSeverity(float p) {
+
+  float absP = abs(p);
+
+  if (absP < SLOUCH_THRESHOLD) {
+    return "Good";
+  }
+  else if (absP < SLOUCH_THRESHOLD + 8) {
+    return "Mild";
+  }
+  else if (absP < SLOUCH_THRESHOLD + 18) {
+    return "Moderate";
+  }
+  else {
+    return "Severe";
+  }
+}
+
+int getSeverityScore(float p) {
+
+  float absP = abs(p);
+
+  if (absP <= 0) {
+    return 10;
+  }
+
+  if (absP >= SLOUCH_THRESHOLD + 25) {
+    return 0;
+  }
+
+  float score =
+      10.0 - (absP / (SLOUCH_THRESHOLD + 25.0)) * 10.0;
+
+  return constrain((int)score, 0, 10);
+}
+
+// =====================================================
+// READ FSR
+// =====================================================
+
+void readFSR() {
+
+  fsrLeft  = analogRead(FSR_LEFT);
+  fsrRight = analogRead(FSR_RIGHT);
+
+  isSitting =
+      (fsrLeft > FSR_THRESHOLD) &&
+      (fsrRight > FSR_THRESHOLD);
+}
+
+// =====================================================
+// READ PITCH
+// =====================================================
+
+float readPitch() {
+
+  int16_t ax, ay, az;
+
+  mpu.getAcceleration(&ax, &ay, &az);
+
+  float AccX = ax / 16384.0;
+  float AccY = ay / 16384.0;
+  float AccZ = az / 16384.0;
+
+  float p = atan2(
+                -AccX,
+                sqrt(AccY * AccY + AccZ * AccZ)
+            ) * 57.2958;
+
+  if (isnan(p)) {
+    p = 0;
+  }
+
+  return p;
+}
+
+// =====================================================
+// PREDICTIVE WARNING
+// =====================================================
+
+void checkPredictiveWarning() {
+
+  if (slouchConfirmed) {
+
+    worseningCount = 0;
+
+    previousPitch = pitch;
+
+    return;
+  }
+
+  float rateOfChange =
+      abs(pitch) - abs(previousPitch);
+
+  if (rateOfChange > PREDICT_THRESHOLD) {
+    worseningCount++;
+  }
+  else {
+    worseningCount = 0;
+  }
+
+  if (
+      worseningCount >= PREDICT_FRAMES &&
+      abs(pitch) < SLOUCH_THRESHOLD
+  ) {
+
+    vibeBothStart(120);
+
+    tone(BUZZER_PIN, 1500);
+
+    delay(200);
+
+    noTone(BUZZER_PIN);
+
+    worseningCount = 0;
+  }
+
+  previousPitch = pitch;
+}
+
+// =====================================================
+// ML INFERENCE
+// =====================================================
+
+String runMLInference() {
+
+  features[0] = pitch;
+  features[1] = fsrLeft;
+  features[2] = fsrRight;
+
+  signal_t signal;
+
+  ei_impulse_result_t result;
+
+  numpy::signal_from_buffer(
+      features,
+      EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE,
+      &signal
+  );
+
+  EI_IMPULSE_ERROR res =
+      run_classifier(&signal, &result, false);
+
+  if (res != EI_IMPULSE_OK) {
+    return "unknown";
+  }
+
+  int maxIndex = 0;
+
+  float maxValue =
+      result.classification[0].value;
+
+  for (int i = 1; i < EI_CLASSIFIER_LABEL_COUNT; i++) {
+
+    if (result.classification[i].value > maxValue) {
+
+      maxValue = result.classification[i].value;
+
+      maxIndex = i;
+    }
+  }
+
+  static String lastGood = "upright";
+
+  if (maxValue < ML_CONFIDENCE_MIN) {
+    return lastGood;
+  }
+
+  lastGood =
+      String(result.classification[maxIndex].label);
+
+  return lastGood;
+}
+
+// =====================================================
+// FIRE ALERT
+// =====================================================
+
+void fireSlouchAlert() {
+
+  tone(BUZZER_PIN, 2000);
+
+  if (severityLabel == "Mild") {
+    vibeBothStart(200);
+  }
+  else if (severityLabel == "Moderate") {
+    vibeBothStart(400);
+  }
+  else if (severityLabel == "Severe") {
+    vibeBothStart(600);
+  }
+}
+
+// =====================================================
+// PROCESS POSTURE
+// =====================================================
+
+void processPosture() {
+
+  postureLabel = runMLInference();
+
+  bool badPostureNow = false;
+
+  if (pitch > SLOUCH_THRESHOLD) {
+
+    postureLabel = "slouch";
+
+    badPostureNow = true;
+  }
+  else if (pitch < -10) {
+
+    postureLabel = "recline";
+
+    badPostureNow = true;
+  }
+  else {
+
+    postureLabel = "upright";
+
+    badPostureNow = false;
+  }
+
+  if (
+      abs(pitch) > 8 &&
+      abs(pitch) < SLOUCH_THRESHOLD
+  ) {
+
+    String mlGuess = runMLInference();
+
+    if (mlGuess == "slouch") {
+
+      postureLabel = "slouch";
+
+      badPostureNow = true;
+    }
+  }
+
+  if (badPostureNow) {
+
+    if (!slouchDetected) {
+
+      slouchDetected = true;
+
+      slouchConfirmed = false;
+
+      slouchStartMs = millis();
+    }
+
+    if (
+        !slouchConfirmed &&
+        (millis() - slouchStartMs >= SLOUCH_CONFIRM_MS)
+    ) {
+
+      slouchConfirmed = true;
+
+      slouchCount++;
+
+      fireSlouchAlert();
+
+      if (
+          pomoRunning &&
+          !pausedBySlouch &&
+          slouchCount >= MAX_SLOUCHES_BEFORE_PAUSE
+      ) {
+
+        pausedBySlouch = true;
+
+        pomoRunning = false;
+
+        vibePulses(3, 150, 100);
+      }
+    }
+
+    static unsigned long lastVibeMs = 0;
+
+    if (slouchConfirmed) {
+
+      if (millis() - lastVibeMs >= 1500) {
+
+        vibeBothStart(400);
+
+        lastVibeMs = millis();
+      }
+    }
+  }
+  else {
+
+    slouchDetected = false;
+
+    slouchConfirmed = false;
+
+    slouchStartMs = 0;
+
+    noTone(BUZZER_PIN);
+
+    severityLabel = "Good";
+  }
+
+  if (badPostureNow) {
+
+    severityLabel = getSeverity(pitch);
+  }
+}
+
+// =====================================================
+// POMODORO
+// =====================================================
+
+void updatePomodoro() {
+
+  if (!pomoRunning || pausedBySlouch) {
+    return;
+  }
+
+  if (millis() - lastPomoTickMs < 1000) {
+    return;
+  }
+
+  lastPomoTickMs = millis();
+
+  if (remainingSec > 0) {
+
+    remainingSec--;
+  }
+  else {
+
+    if (!onBreak) {
+
+       onBreak = true;
+
+  remainingSec = BREAK_MINUTES * 60;
+
+  // Dashboard message
+  pomoStatusMessage = "Break Started";
+
+  sessionJustChanged = true;
+
+  // Vibrate motors
+  vibePulses(2, 500, 200);
+    }
+    else {
+
+      onBreak = false;
+
+  remainingSec = FOCUS_MINUTES * 60;
+
+  // Dashboard message
+  pomoStatusMessage = "Focus Session Started";
+
+  sessionJustChanged = true;
+
+  // Vibrate motor
+  vibePulses(1, 600, 0);
+  }
+    }
+  }
+
+
+// =====================================================
+// DASHBOARD DATA
+// =====================================================
+
+void sendDashboardData() {
+
+  Serial.print("{");
+
+  Serial.print("\"fsr_left\":");
+  Serial.print(fsrLeft);
+  Serial.print(",");
+
+  Serial.print("\"fsr_right\":");
+  Serial.print(fsrRight);
+  Serial.print(",");
+
+  Serial.print("\"pitch\":");
+  Serial.print(pitch, 2);
+  Serial.print(",");
+
+  Serial.print("\"posture\":\"");
+  Serial.print(postureLabel);
+  Serial.print("\",");
+
+  Serial.print("\"severity\":\"");
+  Serial.print(severityLabel);
+  Serial.print("\",");
+
+  Serial.print("\"score\":");
+  Serial.print(getSeverityScore(pitch));
+  Serial.print(",");
+
+  Serial.print("\"sitting\":");
+  Serial.print(isSitting ? 1 : 0);
+  Serial.print(",");
+
+  Serial.print("\"slouch_detected\":");
+  Serial.print(slouchDetected ? 1 : 0);
+  Serial.print(",");
+
+  Serial.print("\"slouch_confirmed\":");
+  Serial.print(slouchConfirmed ? 1 : 0);
+  Serial.print(",");
+
+  Serial.print("\"slouch_count\":");
+  Serial.print(slouchCount);
+  Serial.print(",");
+
+  Serial.print("\"worsening_count\":");
+  Serial.print(worseningCount);
+  Serial.print(",");
+
+  Serial.print("\"pomodoro_running\":");
+  Serial.print(pomoRunning ? 1 : 0);
+  Serial.print(",");
+
+  Serial.print("\"on_break\":");
+  Serial.print(onBreak ? 1 : 0);
+  Serial.print(",");
+
+  Serial.print("\"paused_by_slouch\":");
+  Serial.print(pausedBySlouch ? 1 : 0);
+  Serial.print(",");
+
+  Serial.print("\"remaining_seconds\":");
+  Serial.print(remainingSec);
+  Serial.print(",");
+
+  Serial.print("\"timer\":\"");
+  Serial.print(formatTime(remainingSec));
+  Serial.print("\",");
+
+  Serial.print("\"pomodoro_message\":\"");
+Serial.print(pomoStatusMessage);
+Serial.print("\",");
+
+Serial.print("\"session_changed\":");
+Serial.print(sessionJustChanged ? 1 : 0);
+Serial.print(",");
+
+  Serial.print("\"vibration_active\":");
+
+  Serial.print(
+      (millis() < vibe1UntilMs ||
+       millis() < vibe2UntilMs) ? 1 : 0
+  );
+
+  Serial.print(",");
+
+  Serial.print("\"buzzer_active\":");
+  Serial.print(slouchConfirmed ? 1 : 0);
+  Serial.print(",");
+
+  Serial.print("\"uptime_ms\":");
+  Serial.print(millis());
+
+  sessionJustChanged = false;
+
+  Serial.println("}");
+}
+
+// =====================================================
+// SETUP
+// =====================================================
+
+void setup() {
+
+  Serial.begin(115200);
+
+  Wire.begin(21, 22);
+
+  mpu.initialize();
+
+  if (!mpu.testConnection()) {
+
+    while (1);
+  }
+
+  pinMode(BUZZER_PIN, OUTPUT);
+
+  noTone(BUZZER_PIN);
+
+  pinMode(VIBE_PIN_1, OUTPUT);
+  pinMode(VIBE_PIN_2, OUTPUT);
+
+  digitalWrite(VIBE_PIN_1, LOW);
+  digitalWrite(VIBE_PIN_2, LOW);
+
+  vibePulses(2, 150, 100);
+
+  lastPomoTickMs = millis();
+  pomoRunning = true;
+//  if (isSitting && !pomoRunning) {
+//    pomoRunning = true;
+//    lastPomoTickMs = millis();
+//  }
+}
+
+// =====================================================
+// LOOP
+// =====================================================
+
+void loop() {
+
+  vibeUpdate();
+
+  if (Serial.available()) {
+
+    char cmd = Serial.read();
+
+    if (cmd == 'r') {
+
+      pausedBySlouch = false;
+
+      pomoRunning = true;
+
+      slouchCount = 0;
+    }
+
+    if (cmd == 't') {
+
+      vibePulses(3, 200, 100);
+    }
+  }
+
+  // ==========================================
+  // READ FSR
+  // ==========================================
+
+  readFSR();
+
+  // ==========================================
+  // NOT SITTING
+  // ==========================================
+
+  if (!isSitting) {
+
+    noTone(BUZZER_PIN);
+
+    digitalWrite(VIBE_PIN_1, LOW);
+    digitalWrite(VIBE_PIN_2, LOW);
+
+    slouchDetected = false;
+    slouchConfirmed = false;
+
+    slouchStartMs = 0;
+
+    sendDashboardData();
+
+    delay(300);
+
+    return;
+  }
+
+  // ==========================================
+  // READ PITCH
+  // ==========================================
+
+  pitch = readPitch();
+
+  // ==========================================
+  // PROCESS
+  // ==========================================
+
+  checkPredictiveWarning();
+
+  processPosture();
+
+  updatePomodoro();
+
+  // ==========================================
+  // SEND DATA
+  // ==========================================
+
+  sendDashboardData();
+
+  delay(300);
+}
