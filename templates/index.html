@@ -1,0 +1,136 @@
+Index · HTML
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Smart Posture Monitoring System</title>
+  <link rel="stylesheet" href="/static/style.css" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+</head>
+<body>
+<div class="wrap">
+ 
+  <!-- ── HERO ── -->
+  <header class="hero">
+    <p class="hero-tag">Machine Learning · ESP32 · Real-Time Inference</p>
+    <h1 class="hero-title">Smart Posture Monitoring System</h1>
+    <p class="hero-sub">AI-powered ergonomic health tracking with Pomodoro focus sessions</p>
+    <div class="status-bar">
+      <div class="dot" id="statusDot"></div>
+      <span class="status-text" id="statusText">Waiting for sensor...</span>
+    </div>
+  </header>
+ 
+  <!-- ── SLOUCH SEVERITY INDEX ── -->
+  <section class="ssi-card">
+    <div class="ssi-top">
+      <div>
+        <p class="ssi-label">Slouch Severity Index (SSI)</p>
+        <p class="ssi-value" id="score">—</p>
+      </div>
+      <span class="ssi-badge" id="severityBadge">—</span>
+    </div>
+    <div class="ssi-bar-bg">
+      <div class="ssi-bar" id="ssiBar"></div>
+    </div>
+    <p class="ssi-hint">Score out of 10 — higher is better</p>
+  </section>
+ 
+  <!-- ── SENSOR CARDS (no FSR) ── -->
+  <p class="section-title">Live Sensor Overview</p>
+  <div class="grid">
+    <div class="card blue">
+      <p class="card-label">Pitch Angle</p>
+      <p class="card-value" id="pitch">—</p>
+      <p class="card-sub">Forward lean (°)</p>
+    </div>
+    <div class="card green">
+      <p class="card-label">Posture</p>
+      <p class="card-value card-value--sm" id="posture">—</p>
+      <p class="card-sub">ML classification</p>
+    </div>
+    <div class="card amber">
+      <p class="card-label">Severity</p>
+      <p class="card-value card-value--sm" id="severity">—</p>
+      <p class="card-sub">Posture grade</p>
+    </div>
+    <div class="card pink">
+      <p class="card-label">Slouch Count</p>
+      <p class="card-value" id="slouch">—</p>
+      <p class="card-sub">This session</p>
+    </div>
+  </div>
+ 
+  <!-- ── PITCH CHART (only chart) ── -->
+  <p class="section-title">Pitch Angle Over Time</p>
+  <div class="chart-card">
+    <div class="chart-wrap">
+      <canvas id="pitchChart"></canvas>
+    </div>
+  </div>
+ 
+  <!-- ── POMODORO + SITTING ── -->
+  <div class="bottom-grid">
+    <div>
+      <p class="section-title" style="margin-top:20px">Pomodoro Timer</p>
+      <div class="pomo-card">
+        <div>
+          <p class="pomo-timer" id="timer">—</p>
+          <p class="pomo-session" id="pomoSession">Focus session</p>
+        </div>
+        <span class="pomo-status" id="pomoStatus"></span>
+      </div>
+    </div>
+    <div>
+      <p class="section-title" style="margin-top:20px">Sitting Status</p>
+      <div class="pomo-card sitting-card">
+        <p class="sitting-value" id="sittingStatus">—</p>
+        <p class="sitting-sub" id="sittingSub">Checking sensors...</p>
+      </div>
+    </div>
+  </div>
+ 
+  <!-- ── SESSION SUMMARY (shown after Pomodoro ends) ── -->
+  <section class="summary-panel" id="summaryPanel" style="display:none">
+    <div class="summary-header">
+      <div class="summary-icon">✅</div>
+      <div>
+        <p class="summary-title">Session Complete</p>
+        <p class="summary-sub" id="summarySubtitle">Focus session finished</p>
+      </div>
+      <span class="summary-time" id="summaryTime"></span>
+    </div>
+    <div class="summary-grid">
+      <div class="sum-card">
+        <p class="sum-label">Total Slouches</p>
+        <p class="sum-value" id="sumSlouchCount">—</p>
+      </div>
+      <div class="sum-card">
+        <p class="sum-label">Final SSI Score</p>
+        <p class="sum-value" id="sumSSI">—</p>
+      </div>
+      <div class="sum-card">
+        <p class="sum-label">Final Posture</p>
+        <p class="sum-value" id="sumPosture">—</p>
+      </div>
+      <div class="sum-card">
+        <p class="sum-label">Session Type</p>
+        <p class="sum-value" id="sumType">—</p>
+      </div>
+    </div>
+    <div class="summary-msg" id="summaryMsg"></div>
+    <div class="summary-history-wrap">
+      <p class="section-title" style="margin-bottom:10px">Session Log</p>
+      <ul class="session-log" id="sessionLog"></ul>
+    </div>
+  </section>
+ 
+  <!-- ── TOAST ── -->
+  <div class="toast" id="toast"></div>
+ 
+</div>
+<script src="/static/script.js"></script>
+</body>
+</html>
