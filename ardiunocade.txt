@@ -1,4 +1,3 @@
-#include <veda.naik-project-1_inferencing.h>
 #include <Wire.h>
 #include <MPU6050.h>
 
@@ -22,7 +21,7 @@ float SLOUCH_THRESHOLD = 12.0;
 int   FSR_THRESHOLD    = 500;
 
 #define SLOUCH_CONFIRM_MS          5000
-#define ML_CONFIDENCE_MIN          0.55f
+//#define ML_CONFIDENCE_MIN          0.55f
 
 #define PREDICT_FRAMES             5
 float PREDICT_THRESHOLD = 0.5;
@@ -34,7 +33,11 @@ float PREDICT_THRESHOLD = 0.5;
 // =====================================================
 // SENSOR STATES
 // =====================================================
+unsigned long slouchTimerStartMs = 0;
 
+unsigned long totalSlouchTimeMs = 0;
+
+bool slouchTimerRunning = false;
 int fsrLeft = 0;
 int fsrRight = 0;
 
@@ -90,7 +93,7 @@ bool sessionJustChanged = false;
 // EDGE IMPULSE
 // =====================================================
 
-float features[EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE];
+//float features[EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE];
 
 // =====================================================
 // TIME FORMAT
@@ -289,55 +292,7 @@ void checkPredictiveWarning() {
 // ML INFERENCE
 // =====================================================
 
-String runMLInference() {
 
-  features[0] = pitch;
-  features[1] = fsrLeft;
-  features[2] = fsrRight;
-
-  signal_t signal;
-
-  ei_impulse_result_t result;
-
-  numpy::signal_from_buffer(
-      features,
-      EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE,
-      &signal
-  );
-
-  EI_IMPULSE_ERROR res =
-      run_classifier(&signal, &result, false);
-
-  if (res != EI_IMPULSE_OK) {
-    return "unknown";
-  }
-
-  int maxIndex = 0;
-
-  float maxValue =
-      result.classification[0].value;
-
-  for (int i = 1; i < EI_CLASSIFIER_LABEL_COUNT; i++) {
-
-    if (result.classification[i].value > maxValue) {
-
-      maxValue = result.classification[i].value;
-
-      maxIndex = i;
-    }
-  }
-
-  static String lastGood = "upright";
-
-  if (maxValue < ML_CONFIDENCE_MIN) {
-    return lastGood;
-  }
-
-  lastGood =
-      String(result.classification[maxIndex].label);
-
-  return lastGood;
-}
 
 // =====================================================
 // FIRE ALERT
@@ -364,7 +319,6 @@ void fireSlouchAlert() {
 
 void processPosture() {
 
-  postureLabel = runMLInference();
 
   bool badPostureNow = false;
 
@@ -387,25 +341,31 @@ void processPosture() {
     badPostureNow = false;
   }
 
-  if (
-      abs(pitch) > 8 &&
-      abs(pitch) < SLOUCH_THRESHOLD
-  ) {
-
-    String mlGuess = runMLInference();
-
-    if (mlGuess == "slouch") {
-
-      postureLabel = "slouch";
-
-      badPostureNow = true;
-    }
-  }
+//  if (
+//      abs(pitch) > 8 &&
+//      abs(pitch) < SLOUCH_THRESHOLD
+//  ) {
+//
+//    String mlGuess = runMLInference();
+//
+//    if (mlGuess == "slouch") {
+//
+//      postureLabel = "slouch";
+//
+//      badPostureNow = true;
+//    }
+//  }
 
   if (badPostureNow) {
 
-    if (!slouchDetected) {
+    if (!slouchTimerRunning) {
 
+      slouchTimerStartMs = millis();
+
+      slouchTimerRunning = true;
+    }
+
+    if (!slouchDetected) {
       slouchDetected = true;
 
       slouchConfirmed = false;
@@ -452,15 +412,25 @@ void processPosture() {
   }
   else {
 
-    slouchDetected = false;
+    // STOP SLOUCH TIMER
 
-    slouchConfirmed = false;
+  if (slouchTimerRunning) {
 
-    slouchStartMs = 0;
+    totalSlouchTimeMs +=
+        millis() - slouchTimerStartMs;
 
-    noTone(BUZZER_PIN);
+    slouchTimerRunning = false;
+  }
 
-    severityLabel = "Good";
+  slouchDetected = false;
+
+  slouchConfirmed = false;
+
+  slouchStartMs = 0;
+
+  noTone(BUZZER_PIN);
+
+  severityLabel = "Good";
   }
 
   if (badPostureNow) {
@@ -601,6 +571,26 @@ Serial.print("\",");
 
 Serial.print("\"session_changed\":");
 Serial.print(sessionJustChanged ? 1 : 0);
+Serial.print(",");
+
+unsigned long currentSlouchTimeMs =
+    totalSlouchTimeMs;
+
+if (slouchTimerRunning) {
+
+  currentSlouchTimeMs +=
+      millis() - slouchTimerStartMs;
+}
+
+float slouchTimeSeconds =
+    currentSlouchTimeMs / 1000.0;
+
+// =====================================================
+// SEND SLOUCH TIME
+// =====================================================
+
+Serial.print("\"slouch_time_sec\":");
+Serial.print(slouchTimeSeconds, 1);
 Serial.print(",");
 
   Serial.print("\"vibration_active\":");
